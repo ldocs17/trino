@@ -15,6 +15,7 @@ package io.trino.plugin.iceberg.catalog.rest;
 
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.TrinoException;
+import org.apache.iceberg.rest.auth.OAuth2Properties;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -167,6 +168,46 @@ public class TestPassthroughTokenResolver
         String token = jwtExpiringAt(NOW.minusSeconds(60));
         assertThat(DISABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token)))
                 .isEmpty();
+    }
+
+    @Test
+    public void testStripsLibraryAuthKeys()
+    {
+        Map<String, String> inbound = ImmutableMap.<String, String>builder()
+                .put(EXTRA_CREDENTIAL_TOKEN_KEY, "passthrough")
+                .put(OAuth2Properties.TOKEN, "smuggled-bearer")
+                .put(OAuth2Properties.CREDENTIAL, "smuggled-credential")
+                .put(OAuth2Properties.ACCESS_TOKEN_TYPE, "smuggled-access")
+                .put(OAuth2Properties.REFRESH_TOKEN_TYPE, "smuggled-refresh")
+                .put(OAuth2Properties.ID_TOKEN_TYPE, "smuggled-id")
+                .put(OAuth2Properties.SAML1_TOKEN_TYPE, "smuggled-saml1")
+                .put(OAuth2Properties.SAML2_TOKEN_TYPE, "smuggled-saml2")
+                .put(OAuth2Properties.JWT_TOKEN_TYPE, "smuggled-jwt")
+                .put("benign.credential", "keep-me")
+                .buildOrThrow();
+
+        // Every library-recognized auth key and the consumed passthrough key are removed; unrelated
+        // extra credentials survive untouched.
+        assertThat(ENABLED.stripLibraryAuthCredentials(inbound))
+                .containsExactly(Map.entry("benign.credential", "keep-me"));
+    }
+
+    @Test
+    public void testStripRemovesSmuggledBearerSoQueryIsTokenless()
+    {
+        // A client placing a bearer under a raw library key (not the passthrough key) is left with no
+        // usable token, so REJECT will fail the query rather than honoring the smuggled bearer.
+        Map<String, String> smuggled = ImmutableMap.of(OAuth2Properties.TOKEN, "smuggled-bearer");
+        assertThat(ENABLED.resolveBearerToken(smuggled)).isEmpty();
+        assertThat(ENABLED.stripLibraryAuthCredentials(smuggled)).isEmpty();
+    }
+
+    @Test
+    public void testStripNullExtraCredentialsRejected()
+    {
+        assertThatThrownBy(() -> ENABLED.stripLibraryAuthCredentials(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("extraCredentials is null");
     }
 
     private static String jwtExpiringAt(Instant expiry)
