@@ -39,6 +39,7 @@ import org.apache.iceberg.rest.RESTUtil;
 import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.iceberg.rest.auth.OAuth2Properties.CREDENTIAL;
@@ -97,6 +98,14 @@ public class TrinoIcebergRestCatalogFactory
         this.uniqueTableLocation = icebergConfig.isUniqueTableLocation();
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.caseInsensitiveNameMatching = restConfig.isCaseInsensitiveNameMatching();
+        // The remote-name mapping caches below are catalog-scoped (shared across users) and keyed by
+        // name only, with no user dimension. Under token passthrough they are populated under the
+        // requesting user's identity, so one user's resolved name could be served to another. Reject
+        // the combination at startup. The check is meaningful only for OAuth2, the only security mode
+        // that supports passthrough.
+        checkArgument(
+                !(security == Security.OAUTH2 && tokenPassthroughEnabled && caseInsensitiveNameMatching),
+                "Cannot enable both 'iceberg.rest-catalog.oauth2.passthrough-enabled' and 'iceberg.rest-catalog.case-insensitive-name-matching': the remote-name mapping cache is shared across users and keyed by name only, so one user's resolved name could be served to another");
         this.remoteNamespaceMappingCache = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(restConfig.getCaseInsensitiveNameMatchingCacheTtl().toMillis(), MILLISECONDS)
                 .shareNothingWhenDisabled()
