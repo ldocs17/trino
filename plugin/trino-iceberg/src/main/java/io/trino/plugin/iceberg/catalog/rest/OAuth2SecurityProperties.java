@@ -26,11 +26,13 @@ public class OAuth2SecurityProperties
         implements SecurityProperties
 {
     private final Map<String, String> securityProperties;
+    private final boolean tokenPassthroughEnabled;
 
     @Inject
     public OAuth2SecurityProperties(OAuth2SecurityConfig securityConfig)
     {
         requireNonNull(securityConfig, "securityConfig is null");
+        this.tokenPassthroughEnabled = securityConfig.isPassthroughEnabled();
 
         ImmutableMap.Builder<String, String> propertiesBuilder = ImmutableMap.builder();
         propertiesBuilder.put(AuthProperties.AUTH_TYPE, AuthProperties.AUTH_TYPE_OAUTH2);
@@ -54,5 +56,11 @@ public class OAuth2SecurityProperties
     public Map<String, String> get()
     {
         return securityProperties;
+    }
+
+    @Override
+    public boolean tokenPassthroughEnabled()
+    {
+        return tokenPassthroughEnabled;
     }
 }

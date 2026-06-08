@@ -18,4 +18,9 @@ import java.util.Map;
 public interface SecurityProperties
 {
     Map<String, String> get();
+
+    default boolean tokenPassthroughEnabled()
+    {
+        return false;
+    }
 }
