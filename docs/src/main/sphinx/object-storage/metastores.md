@@ -607,7 +607,7 @@ token, per request, as the `Authorization` header on catalog calls, so the backe
 enforces the user's own grants and attributes activity to them. The feature is
 opt-in and backward compatible: catalogs that do not enable it are unaffected.
 
-Passthrough requires `iceberg.rest-catalog.session-type=USER`; the catalog fails to
+Passthrough requires `iceberg.rest-catalog.session=USER`; the catalog fails to
 start otherwise. It is also mutually exclusive with
 `iceberg.rest-catalog.case-insensitive-name-matching`, because the name-resolution
 cache is shared across users.
@@ -618,7 +618,17 @@ user query is in scope. With `missing-token-behavior=FALLBACK`, tokenless querie
 also run under that static identity; with the default `REJECT`, tokenless queries
 fail before any catalog call.
 
-Observe the following operational guidance when enabling passthrough:
+:::{warning}
+Token passthrough governs the **control plane (catalog metadata) only**. Underlying
+object-store reads and writes use Trino's own storage identity unless
+`iceberg.rest-catalog.vended-credentials-enabled=true` returns per-user-scoped
+credentials from the backend. Without vended credentials, per-user authorization is
+limited to catalog metadata, and object data remains accessible under Trino's shared
+storage identity. Pair passthrough with vended credentials for end-to-end per-user
+enforcement.
+:::
+
+Observe the following additional operational guidance when enabling passthrough:
 
 - **Require TLS on client connections.** Extra credentials carry bearer tokens over
   the [Trino client protocol](/client/client-protocol); enable HTTPS so they are not
@@ -628,12 +638,6 @@ Observe the following operational guidance when enabling passthrough:
   `iceberg.rest-catalog.oauth2.token-refresh-enabled=false` and ensure each token's
   lifetime comfortably exceeds typical query runtime; Trino performs a best-effort
   expiry pre-check but cannot prevent a token expiring mid-query.
-- **Pair with vended credentials for data-plane enforcement.** Passthrough governs
-  the control plane (catalog metadata) only. Underlying object-store reads and writes
-  use Trino's own storage identity unless
-  `iceberg.rest-catalog.vended-credentials-enabled=true` returns per-user-scoped
-  credentials from the backend. Without vended credentials, per-user authorization is
-  limited to catalog metadata.
 
 (iceberg-jdbc-catalog)=
 ### JDBC catalog

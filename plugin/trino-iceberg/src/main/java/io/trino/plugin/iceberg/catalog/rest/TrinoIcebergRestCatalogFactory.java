@@ -113,6 +113,11 @@ public class TrinoIcebergRestCatalogFactory
         checkArgument(
                 !(security == Security.OAUTH2 && tokenPassthroughEnabled && sessionType != SessionType.USER),
                 "Cannot enable 'iceberg.rest-catalog.oauth2.passthrough-enabled' without setting 'iceberg.rest-catalog.session' to USER: passthrough forwards each user's token only on the per-request USER session, so any other session type would silently run all queries under the static catalog identity");
+        // 'iceberg.rest-catalog.oauth2.token-refresh-enabled=false' is recommended with passthrough (Trino
+        // has no grant to refresh a user's short-lived bearer), but it is intentionally NOT enforced here:
+        // the flag is catalog-wide and also governs the static bootstrap session, so forcing it off would
+        // be a surprising side effect of enabling passthrough. It composes freely with passthrough and is
+        // left as operator guidance (see docs) rather than a hard startup guard.
         this.remoteNamespaceMappingCache = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(restConfig.getCaseInsensitiveNameMatchingCacheTtl().toMillis(), MILLISECONDS)
                 .shareNothingWhenDisabled()

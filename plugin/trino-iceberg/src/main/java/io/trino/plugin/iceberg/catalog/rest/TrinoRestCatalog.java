@@ -928,15 +928,14 @@ public class TrinoRestCatalog
 
                 Map<String, String> extraCredentials = session.getIdentity().getExtraCredentials();
                 Optional<String> passthroughBearer = passthroughTokenResolver.resolveBearerToken(extraCredentials);
-                // Strip every library-recognized auth key up front so a client cannot smuggle a bearer
-                // under a raw key (token/credential/token-exchange types) past the passthrough gate.
-                Map<String, String> sanitizedCredentials = passthroughTokenResolver.stripLibraryAuthCredentials(extraCredentials);
                 Map<String, String> credentials;
                 if (passthroughBearer.isPresent()) {
-                    // The injected token is the sole bearer; sanitizedCredentials never carries TOKEN, so
-                    // the build cannot collide and the resolver's authorized token always takes precedence.
+                    // Strip every library-recognized auth key first so a client cannot smuggle a bearer under
+                    // a raw key (token/credential/token-exchange types) past the passthrough gate. The injected
+                    // token is then the sole bearer; the sanitized map never carries TOKEN, so the build cannot
+                    // collide and the resolver's authorized token always takes precedence.
                     credentials = ImmutableMap.<String, String>builder()
-                            .putAll(sanitizedCredentials)
+                            .putAll(passthroughTokenResolver.stripLibraryAuthCredentials(extraCredentials))
                             .put(OAuth2Properties.TOKEN, passthroughBearer.get())
                             .buildOrThrow();
                 }
@@ -944,10 +943,10 @@ public class TrinoRestCatalog
                     // Passthrough is enabled but the query carried no usable token. REJECT fails fast here,
                     // before any catalog call; FALLBACK returns and the request runs under the catalog's
                     // static service-account identity because no subject token is minted below. Any
-                    // (blank/whitespace or raw-key) auth material the client supplied was stripped above so
+                    // (blank/whitespace or raw-key) auth material the client supplied is stripped here so
                     // it cannot reach the downstream library and override the static identity.
                     passthroughTokenResolver.checkMissingTokenAllowed();
-                    credentials = sanitizedCredentials;
+                    credentials = passthroughTokenResolver.stripLibraryAuthCredentials(extraCredentials);
                 }
                 else {
                     Map<String, Object> claims = ImmutableMap.<String, Object>builder()
