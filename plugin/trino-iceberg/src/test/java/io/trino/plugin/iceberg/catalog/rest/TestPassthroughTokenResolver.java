@@ -14,18 +14,28 @@
 package io.trino.plugin.iceberg.catalog.rest;
 
 import com.google.common.collect.ImmutableMap;
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Base64;
 import java.util.Map;
 
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_EXPIRED;
+import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.EXPIRY_LEEWAY;
 import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestPassthroughTokenResolver
 {
-    private static final PassthroughTokenResolver ENABLED = new PassthroughTokenResolver(true);
-    private static final PassthroughTokenResolver DISABLED = new PassthroughTokenResolver(false);
+    private static final Instant NOW = Instant.parse("2026-06-08T00:00:00Z");
+    private static final Clock FIXED_CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
+    private static final PassthroughTokenResolver ENABLED = new PassthroughTokenResolver(true, FIXED_CLOCK);
+    private static final PassthroughTokenResolver DISABLED = new PassthroughTokenResolver(false, FIXED_CLOCK);
 
     @Test
     public void testEnabledWithTokenReturnsToken()
@@ -74,5 +84,71 @@ public class TestPassthroughTokenResolver
         assertThatThrownBy(() -> ENABLED.resolveBearerToken(null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("extraCredentials is null");
+    }
+
+    @Test
+    public void testValidJwtPasses()
+    {
+        String token = jwtExpiringAt(NOW.plusSeconds(3600));
+        assertThat(ENABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token)))
+                .contains(token);
+    }
+
+    @Test
+    public void testExpiredJwtRejected()
+    {
+        String token = jwtExpiringAt(NOW.minusSeconds(60));
+        assertThatThrownBy(() -> ENABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token)))
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_EXPIRED.toErrorCode())
+                .hasMessageContaining("expired");
+    }
+
+    @Test
+    public void testNearExpiryJwtRejected()
+    {
+        String token = jwtExpiringAt(NOW.plus(EXPIRY_LEEWAY).minusSeconds(1));
+        assertThatThrownBy(() -> ENABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token)))
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_EXPIRED.toErrorCode());
+    }
+
+    @Test
+    public void testOpaqueTokenSkipsExpiryCheck()
+    {
+        // not a JWT — no dots, not base64-decodable JSON; must pass through untouched
+        assertThat(ENABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, "opaque-token")))
+                .contains("opaque-token");
+        assertThat(ENABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, "not.a.jwt")))
+                .contains("not.a.jwt");
+    }
+
+    @Test
+    public void testJwtWithoutExpClaimPasses()
+    {
+        String token = jwt("{\"sub\":\"alice\"}");
+        assertThat(ENABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token)))
+                .contains(token);
+    }
+
+    @Test
+    public void testDisabledDoesNotCheckExpiry()
+    {
+        String token = jwtExpiringAt(NOW.minusSeconds(60));
+        assertThat(DISABLED.resolveBearerToken(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token)))
+                .isEmpty();
+    }
+
+    private static String jwtExpiringAt(Instant expiry)
+    {
+        return jwt("{\"exp\":%d}".formatted(expiry.getEpochSecond()));
+    }
+
+    private static String jwt(String payloadJson)
+    {
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+        String header = encoder.encodeToString("{\"alg\":\"none\"}".getBytes(UTF_8));
+        String payload = encoder.encodeToString(payloadJson.getBytes(UTF_8));
+        return header + "." + payload + ".signature";
     }
 }
