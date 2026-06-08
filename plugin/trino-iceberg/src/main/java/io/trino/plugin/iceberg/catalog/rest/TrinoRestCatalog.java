@@ -153,7 +153,8 @@ public class TrinoRestCatalog
             Cache<Namespace, Namespace> remoteNamespaceMappingCache,
             Cache<TableIdentifier, TableIdentifier> remoteTableMappingCache,
             boolean viewEndpointsEnabled,
-            boolean tokenPassthroughEnabled)
+            boolean tokenPassthroughEnabled,
+            PassthroughTokenResolver.MissingTokenBehavior missingTokenBehavior)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.restSessionCatalog = requireNonNull(restSessionCatalog, "restSessionCatalog is null");
@@ -169,7 +170,7 @@ public class TrinoRestCatalog
         this.remoteNamespaceMappingCache = requireNonNull(remoteNamespaceMappingCache, "remoteNamespaceMappingCache is null");
         this.remoteTableMappingCache = requireNonNull(remoteTableMappingCache, "remoteTableMappingCache is null");
         this.viewEndpointsEnabled = viewEndpointsEnabled;
-        this.passthroughTokenResolver = new PassthroughTokenResolver(tokenPassthroughEnabled);
+        this.passthroughTokenResolver = new PassthroughTokenResolver(tokenPassthroughEnabled, missingTokenBehavior);
     }
 
     @Override
@@ -922,6 +923,17 @@ public class TrinoRestCatalog
                                     key -> !key.equals(PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY) && !key.equals(OAuth2Properties.TOKEN)))
                             .put(OAuth2Properties.TOKEN, passthroughBearer.get())
                             .buildOrThrow();
+                }
+                else if (passthroughTokenResolver.isEnabled()) {
+                    // Passthrough is enabled but the query carried no usable token. REJECT fails fast here,
+                    // before any catalog call; FALLBACK returns and the request runs under the catalog's
+                    // static service-account identity because no subject token is minted below. Any
+                    // (blank/whitespace) auth token the client supplied is stripped so it cannot reach the
+                    // downstream library and override the static identity.
+                    passthroughTokenResolver.checkMissingTokenAllowed();
+                    credentials = ImmutableMap.copyOf(Maps.filterKeys(
+                            session.getIdentity().getExtraCredentials(),
+                            key -> !key.equals(PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY) && !key.equals(OAuth2Properties.TOKEN)));
                 }
                 else {
                     Map<String, Object> claims = ImmutableMap.<String, Object>builder()

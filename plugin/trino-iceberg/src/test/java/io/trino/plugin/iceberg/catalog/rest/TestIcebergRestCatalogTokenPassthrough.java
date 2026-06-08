@@ -24,6 +24,8 @@ import io.trino.filesystem.memory.MemoryFileSystemFactory;
 import io.trino.plugin.iceberg.DefaultIcebergFileSystemFactory;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
 import io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogConfig.Security;
+import io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.MissingTokenBehavior;
+import io.trino.spi.TrinoException;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.security.ConnectorIdentity;
@@ -49,12 +51,14 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_MISSING;
 import static io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogConfig.SessionType.USER;
 import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY;
 import static io.trino.plugin.iceberg.catalog.rest.RestCatalogTestUtils.backendCatalog;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class TestIcebergRestCatalogTokenPassthrough
@@ -95,7 +99,12 @@ public class TestIcebergRestCatalogTokenPassthrough
                 .put(OAuth2Properties.TOKEN_REFRESH_ENABLED, "false")
                 .buildOrThrow());
 
-        catalog = new TrinoRestCatalog(
+        catalog = buildCatalog(MissingTokenBehavior.REJECT);
+    }
+
+    private TrinoCatalog buildCatalog(MissingTokenBehavior missingTokenBehavior)
+    {
+        return new TrinoRestCatalog(
                 new DefaultIcebergFileSystemFactory(new MemoryFileSystemFactory()),
                 restSessionCatalog,
                 new CatalogName("iceberg_rest"),
@@ -110,7 +119,8 @@ public class TestIcebergRestCatalogTokenPassthrough
                 EvictableCacheBuilder.newBuilder().expireAfterWrite(1000, MILLISECONDS).shareNothingWhenDisabled().build(),
                 EvictableCacheBuilder.newBuilder().expireAfterWrite(1000, MILLISECONDS).shareNothingWhenDisabled().build(),
                 true,
-                true);
+                true,
+                missingTokenBehavior);
     }
 
     @AfterAll
@@ -159,12 +169,69 @@ public class TestIcebergRestCatalogTokenPassthrough
         assertThat(capturedAuthorizationHeaders).contains("Bearer user-token-bob");
     }
 
+    @Test
+    public void testRejectFailsBeforeAnyCatalogCall()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        TrinoCatalog rejectCatalog = buildCatalog(MissingTokenBehavior.REJECT);
+
+        assertThatThrownBy(() -> rejectCatalog.listNamespaces(tokenlessSession("alice")))
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_MISSING.toErrorCode())
+                .hasMessageContaining(EXTRA_CREDENTIAL_TOKEN_KEY);
+
+        // The query must fail before reaching the catalog
+        assertThat(capturedRequestLines).isEmpty();
+    }
+
+    @Test
+    public void testFallbackUsesStaticServiceAccountBearer()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        TrinoCatalog fallbackCatalog = buildCatalog(MissingTokenBehavior.FALLBACK);
+
+        fallbackCatalog.listNamespaces(tokenlessSession("alice"));
+
+        // The subject token was dropped, so the request runs under the static bootstrap identity
+        assertThat(capturedAuthorizationHeaders).contains("Bearer static-bootstrap-token");
+        // No per-user token exchange occurs
+        assertThat(capturedRequestLines)
+                .noneMatch(line -> line.contains("oauth/tokens") || line.contains("v1/oauth"));
+    }
+
+    @Test
+    public void testFallbackStripsBlankTokenKey()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        TrinoCatalog fallbackCatalog = buildCatalog(MissingTokenBehavior.FALLBACK);
+
+        // A blank token under the passthrough key is treated as absent; it must be stripped so it
+        // cannot reach the downstream library, and the request runs under the static identity.
+        fallbackCatalog.listNamespaces(sessionForUser("alice", "   "));
+
+        assertThat(capturedAuthorizationHeaders).contains("Bearer static-bootstrap-token");
+        assertThat(capturedAuthorizationHeaders).doesNotContain("Bearer    ", "Bearer ");
+    }
+
     private static ConnectorSession sessionForUser(String user, String token)
     {
         return TestingConnectorSession.builder()
                 .setIdentity(ConnectorIdentity.forUser(user)
                         .withExtraCredentials(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token))
                         .build())
+                .build();
+    }
+
+    private static ConnectorSession tokenlessSession(String user)
+    {
+        return TestingConnectorSession.builder()
+                .setIdentity(ConnectorIdentity.forUser(user).build())
                 .build();
     }
 

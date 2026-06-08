@@ -56,6 +56,7 @@ public class TrinoIcebergRestCatalogFactory
     private final SessionType sessionType;
     private final boolean viewEndpointsEnabled;
     private final boolean tokenPassthroughEnabled;
+    private final PassthroughTokenResolver.MissingTokenBehavior missingTokenBehavior;
     private final SecurityProperties securityProperties;
     private final IcebergRestCatalogPropertiesProvider catalogPropertiesProvider;
     private final boolean uniqueTableLocation;
@@ -90,6 +91,7 @@ public class TrinoIcebergRestCatalogFactory
         this.viewEndpointsEnabled = restConfig.isViewEndpointsEnabled();
         this.securityProperties = requireNonNull(securityProperties, "securityProperties is null");
         this.tokenPassthroughEnabled = securityProperties.tokenPassthroughEnabled();
+        this.missingTokenBehavior = securityProperties.missingTokenBehavior();
         this.catalogPropertiesProvider = requireNonNull(catalogPropertiesProvider, "catalogPropertiesProvider is null");
         requireNonNull(icebergConfig, "icebergConfig is null");
         this.uniqueTableLocation = icebergConfig.isUniqueTableLocation();
@@ -146,6 +148,7 @@ public class TrinoIcebergRestCatalogFactory
                 remoteNamespaceMappingCache,
                 remoteTableMappingCache,
                 viewEndpointsEnabled,
-                tokenPassthroughEnabled);
+                tokenPassthroughEnabled,
+                missingTokenBehavior);
     }
 }
