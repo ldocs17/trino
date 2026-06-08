@@ -49,6 +49,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_MISSING;
@@ -219,11 +220,50 @@ public class TestIcebergRestCatalogTokenPassthrough
         assertThat(capturedAuthorizationHeaders).doesNotContain("Bearer    ", "Bearer ");
     }
 
+    @Test
+    public void testSmuggledRawKeyBearerIsRejected()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        TrinoCatalog rejectCatalog = buildCatalog(MissingTokenBehavior.REJECT);
+
+        // A client placing a bearer under the library's raw 'token' key (not the passthrough key) must be
+        // treated as tokenless and rejected before any catalog call — the smuggled bearer must not reach
+        // the wire.
+        assertThatThrownBy(() -> rejectCatalog.listNamespaces(sessionWithCredentials("mallory", ImmutableMap.of(OAuth2Properties.TOKEN, "smuggled-bearer"))))
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_MISSING.toErrorCode());
+
+        assertThat(capturedRequestLines).isEmpty();
+        assertThat(capturedAuthorizationHeaders).doesNotContain("Bearer smuggled-bearer");
+    }
+
+    @Test
+    public void testCollidingRawKeyDoesNotOverridePassthroughToken()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        // The passthrough token must win over a colliding raw 'token' key, with no internal error.
+        catalog.listNamespaces(sessionWithCredentials("alice", ImmutableMap.of(
+                EXTRA_CREDENTIAL_TOKEN_KEY, "user-token-alice",
+                OAuth2Properties.TOKEN, "smuggled-bearer")));
+
+        assertThat(capturedAuthorizationHeaders).contains("Bearer user-token-alice");
+        assertThat(capturedAuthorizationHeaders).doesNotContain("Bearer smuggled-bearer");
+    }
+
     private static ConnectorSession sessionForUser(String user, String token)
+    {
+        return sessionWithCredentials(user, ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token));
+    }
+
+    private static ConnectorSession sessionWithCredentials(String user, Map<String, String> extraCredentials)
     {
         return TestingConnectorSession.builder()
                 .setIdentity(ConnectorIdentity.forUser(user)
-                        .withExtraCredentials(ImmutableMap.of(EXTRA_CREDENTIAL_TOKEN_KEY, token))
+                        .withExtraCredentials(extraCredentials)
                         .build())
                 .build();
     }

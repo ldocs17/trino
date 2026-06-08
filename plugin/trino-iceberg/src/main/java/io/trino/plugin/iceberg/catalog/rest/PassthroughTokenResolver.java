@@ -15,7 +15,11 @@ package io.trino.plugin.iceberg.catalog.rest;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 import io.trino.spi.TrinoException;
+import org.apache.iceberg.rest.auth.OAuth2Properties;
 
 import java.io.IOException;
 import java.time.Clock;
@@ -24,6 +28,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_EXPIRED;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_MISSING;
@@ -46,6 +51,22 @@ import static java.util.Objects.requireNonNull;
 public final class PassthroughTokenResolver
 {
     public static final String EXTRA_CREDENTIAL_TOKEN_KEY = "iceberg.oauth2.token";
+
+    /**
+     * Extra-credential keys the Iceberg REST OAuth2 client honors as auth material: the raw bearer
+     * {@code token}, the client {@code credential}, and the token-exchange subject-token types. Under
+     * passthrough these are stripped from inbound extra credentials so a client cannot smuggle a bearer
+     * under a raw library key and bypass the opt-in flag, REJECT, normalization, and the expiry pre-check.
+     */
+    private static final Set<String> LIBRARY_AUTH_KEYS = ImmutableSet.of(
+            OAuth2Properties.TOKEN,
+            OAuth2Properties.CREDENTIAL,
+            OAuth2Properties.ACCESS_TOKEN_TYPE,
+            OAuth2Properties.REFRESH_TOKEN_TYPE,
+            OAuth2Properties.ID_TOKEN_TYPE,
+            OAuth2Properties.SAML1_TOKEN_TYPE,
+            OAuth2Properties.SAML2_TOKEN_TYPE,
+            OAuth2Properties.JWT_TOKEN_TYPE);
 
     /**
      * Governs what happens when passthrough is enabled but a query carries no usable token.
@@ -112,6 +133,21 @@ public final class PassthroughTokenResolver
         }
         checkNotExpired(token);
         return Optional.of(token);
+    }
+
+    /**
+     * Removes every inbound extra-credential key the REST library would honor as auth material (see
+     * {@link #LIBRARY_AUTH_KEYS}) along with the consumed {@value #EXTRA_CREDENTIAL_TOKEN_KEY} key, so
+     * the only bearer that can reach the catalog is the one the caller injects. Building the result with
+     * overwrite-safe semantics means a colliding inbound key never causes an internal error and the
+     * injected token always takes precedence.
+     */
+    public Map<String, String> stripLibraryAuthCredentials(Map<String, String> extraCredentials)
+    {
+        requireNonNull(extraCredentials, "extraCredentials is null");
+        return ImmutableMap.copyOf(Maps.filterKeys(
+                extraCredentials,
+                key -> !key.equals(EXTRA_CREDENTIAL_TOKEN_KEY) && !LIBRARY_AUTH_KEYS.contains(key)));
     }
 
     /**
