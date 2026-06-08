@@ -518,6 +518,15 @@ following properties:
 * - `iceberg.rest-catalog.oauth2.token-exchange-enabled`
   - Controls whether to use the token exchange flow to acquire new tokens.
     Defaults to `true` 
+* - `iceberg.rest-catalog.oauth2.passthrough-enabled`
+  - Forward each user's own OAuth2 bearer token, supplied as the
+    `iceberg.oauth2.token` extra credential, to the REST catalog instead of the
+    static catalog `token` or `credential`. Defaults to `false`. See
+    [](iceberg-rest-catalog-token-passthrough).
+* - `iceberg.rest-catalog.oauth2.missing-token-behavior`
+  - Behavior when `passthrough-enabled` is `true` but a query supplies no
+    `iceberg.oauth2.token` extra credential. `REJECT` fails the query; `FALLBACK`
+    uses the static catalog identity. Defaults to `REJECT`.
 * - `iceberg.rest-catalog.vended-credentials-enabled`
   - Use credentials provided by the REST backend for file system access.
     Defaults to `false`.
@@ -577,6 +586,71 @@ iceberg.rest-catalog.view-endpoints-enabled=false
 fs.gcs.enabled=true
 gcs.json-key-file-path=/path/to/gcs_keyfile.json
 ```
+
+(iceberg-rest-catalog-token-passthrough)=
+#### Per-user OAuth2 token passthrough
+
+By default an `OAUTH2` REST catalog authenticates to the catalog server with a
+single static identity, shared by all Trino users, configured through
+`iceberg.rest-catalog.oauth2.token` or `iceberg.rest-catalog.oauth2.credential`.
+
+Setting `iceberg.rest-catalog.oauth2.passthrough-enabled=true` switches the
+catalog to forward each user's own OAuth2 bearer token to the REST catalog
+server, so that catalog and metadata operations are authorized as the querying
+user rather than the shared catalog identity. The user supplies their bearer
+token as the `iceberg.oauth2.token`
+*extra credential* on the client connection, and Trino forwards
+that exact token as the `Authorization` header on the per-user catalog session.
+No token exchange is performed.
+
+The following example enables passthrough:
+
+```properties
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.rest-catalog.uri=https://catalog.example.com/v1
+iceberg.rest-catalog.security=OAUTH2
+iceberg.rest-catalog.oauth2.passthrough-enabled=true
+iceberg.rest-catalog.oauth2.missing-token-behavior=REJECT
+iceberg.rest-catalog.oauth2.token-refresh-enabled=false
+```
+
+When passthrough is enabled, `iceberg.rest-catalog.oauth2.missing-token-behavior`
+controls what happens if a query does not supply the `iceberg.oauth2.token`
+extra credential:
+
+- `REJECT` (default) fails the query. Use this when every user must present
+  their own token.
+- `FALLBACK` uses the static catalog identity (the configured `token` or
+  `credential`) for that query. Use this only when a shared service identity is
+  an acceptable default for users who do not present a token.
+
+Observe the following operational requirements when enabling passthrough:
+
+- **Enforce TLS on client connections.** Extra credentials carry the user's
+  bearer token in clear text, so client-to-coordinator connections must use
+  HTTPS/TLS. See [](/security/tls). Do not enable passthrough on a cluster that
+  accepts plaintext client connections.
+- **Control plane only.** Passthrough authorizes catalog and metadata operations
+  (the control plane). It does not authorize access to the underlying data
+  files (the data plane). For per-user enforcement of data-file access, pair
+  passthrough with `iceberg.rest-catalog.vended-credentials-enabled=true` so the
+  REST backend vends per-user, scoped storage credentials. Without vended
+  credentials, data-file access still uses the catalog's configured file system
+  identity.
+- **Token TTL must exceed query duration.** The forwarded token is used for the
+  lifetime of the query. A user's token time-to-live must be longer than the
+  expected duration of their longest query, otherwise the token can expire
+  mid-query and the operation fails.
+- **Tune the auth-session cache for high QPS.** Each distinct forwarded token
+  produces a separate cached authentication session. Under high query-per-second
+  workloads with many distinct users, lower `iceberg.rest-catalog.session-timeout`
+  (default `1h`) to bound the cache footprint, trading a larger cache for more
+  frequent re-authentication.
+- **Disable token refresh.** Set
+  `iceberg.rest-catalog.oauth2.token-refresh-enabled=false` for passthrough
+  catalogs. The forwarded token belongs to the user, and the catalog must not
+  attempt to refresh it on the user's behalf.
 
 The REST catalog supports [view management](sql-view-management) 
 using the [Iceberg View specification](https://iceberg.apache.org/view-spec/).
