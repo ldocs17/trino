@@ -129,7 +129,8 @@ public class TestTrinoRestCatalog
                 EvictableCacheBuilder.newBuilder().expireAfterWrite(1000, MILLISECONDS).shareNothingWhenDisabled().build(),
                 EvictableCacheBuilder.newBuilder().expireAfterWrite(1000, MILLISECONDS).shareNothingWhenDisabled().build(),
                 true,
-                false);
+                false,
+                PassthroughTokenResolver.MissingTokenBehavior.REJECT);
     }
 
     @Test

@@ -24,18 +24,22 @@ import java.util.Base64;
 import java.util.Map;
 
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_EXPIRED;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_MISSING;
 import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.EXPIRY_LEEWAY;
 import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY;
+import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.MissingTokenBehavior.FALLBACK;
+import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.MissingTokenBehavior.REJECT;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestPassthroughTokenResolver
 {
     private static final Instant NOW = Instant.parse("2026-06-08T00:00:00Z");
     private static final Clock FIXED_CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
-    private static final PassthroughTokenResolver ENABLED = new PassthroughTokenResolver(true, FIXED_CLOCK);
-    private static final PassthroughTokenResolver DISABLED = new PassthroughTokenResolver(false, FIXED_CLOCK);
+    private static final PassthroughTokenResolver ENABLED = new PassthroughTokenResolver(true, REJECT, FIXED_CLOCK);
+    private static final PassthroughTokenResolver DISABLED = new PassthroughTokenResolver(false, REJECT, FIXED_CLOCK);
 
     @Test
     public void testEnabledWithTokenReturnsToken()
@@ -60,6 +64,32 @@ public class TestPassthroughTokenResolver
                 .isEmpty();
         assertThat(ENABLED.resolveBearerToken(ImmutableMap.of("other.credential", "value")))
                 .isEmpty();
+    }
+
+    @Test
+    public void testRejectBehaviorThrowsOnMissingToken()
+    {
+        PassthroughTokenResolver resolver = new PassthroughTokenResolver(true, REJECT, FIXED_CLOCK);
+        assertThatThrownBy(resolver::enforceMissingTokenPolicy)
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_MISSING.toErrorCode())
+                .hasMessageContaining(EXTRA_CREDENTIAL_TOKEN_KEY)
+                .hasMessageContaining("reconnect");
+    }
+
+    @Test
+    public void testFallbackBehaviorAllowsMissingToken()
+    {
+        PassthroughTokenResolver resolver = new PassthroughTokenResolver(true, FALLBACK, FIXED_CLOCK);
+        assertThatCode(resolver::enforceMissingTokenPolicy).doesNotThrowAnyException();
+        assertThat(resolver.missingTokenBehavior()).isEqualTo(FALLBACK);
+    }
+
+    @Test
+    public void testEnabledReflectsConstruction()
+    {
+        assertThat(ENABLED.isEnabled()).isTrue();
+        assertThat(DISABLED.isEnabled()).isFalse();
     }
 
     @Test

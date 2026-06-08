@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_EXPIRED;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_MISSING;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -47,6 +48,24 @@ public final class PassthroughTokenResolver
     public static final String EXTRA_CREDENTIAL_TOKEN_KEY = "iceberg.oauth2.token";
 
     /**
+     * Governs what happens when passthrough is enabled but a query carries no usable token.
+     */
+    public enum MissingTokenBehavior
+    {
+        /**
+         * Fail the query fast, before any catalog call, so a misconfigured client can never silently
+         * run under the catalog's shared identity.
+         */
+        REJECT,
+        /**
+         * Resolve the query to the catalog's static service-account identity by dropping the injected
+         * subject token, so the per-request session falls back to the static parent rather than
+         * performing a token exchange.
+         */
+        FALLBACK,
+    }
+
+    /**
      * Tokens expiring within this window are treated as already stale so that a query does not
      * race the token's expiry on its way to the REST catalog.
      */
@@ -56,17 +75,29 @@ public final class PassthroughTokenResolver
     private static final Base64.Decoder URL_DECODER = Base64.getUrlDecoder();
 
     private final boolean enabled;
+    private final MissingTokenBehavior missingTokenBehavior;
     private final Clock clock;
 
-    public PassthroughTokenResolver(boolean enabled)
+    public PassthroughTokenResolver(boolean enabled, MissingTokenBehavior missingTokenBehavior)
     {
-        this(enabled, Clock.systemUTC());
+        this(enabled, missingTokenBehavior, Clock.systemUTC());
     }
 
-    PassthroughTokenResolver(boolean enabled, Clock clock)
+    PassthroughTokenResolver(boolean enabled, MissingTokenBehavior missingTokenBehavior, Clock clock)
     {
         this.enabled = enabled;
+        this.missingTokenBehavior = requireNonNull(missingTokenBehavior, "missingTokenBehavior is null");
         this.clock = requireNonNull(clock, "clock is null");
+    }
+
+    public boolean isEnabled()
+    {
+        return enabled;
+    }
+
+    public MissingTokenBehavior missingTokenBehavior()
+    {
+        return missingTokenBehavior;
     }
 
     public Optional<String> resolveBearerToken(Map<String, String> extraCredentials)
@@ -81,6 +112,22 @@ public final class PassthroughTokenResolver
         }
         checkNotExpired(token);
         return Optional.of(token);
+    }
+
+    /**
+     * Applies the configured {@link MissingTokenBehavior} when passthrough is enabled but the request
+     * carried no usable token. Under {@link MissingTokenBehavior#REJECT} this throws so the query fails
+     * before any catalog call is made; under {@link MissingTokenBehavior#FALLBACK} it returns normally
+     * and the caller resolves the request to the static service-account identity.
+     */
+    public void enforceMissingTokenPolicy()
+    {
+        if (missingTokenBehavior == MissingTokenBehavior.REJECT) {
+            throw new TrinoException(
+                    ICEBERG_OAUTH2_TOKEN_MISSING,
+                    "OAuth2 token passthrough is enabled but the query supplied no '%s' extra credential; reconnect with a valid OAuth2 token".formatted(
+                            EXTRA_CREDENTIAL_TOKEN_KEY));
+        }
     }
 
     private void checkNotExpired(String token)

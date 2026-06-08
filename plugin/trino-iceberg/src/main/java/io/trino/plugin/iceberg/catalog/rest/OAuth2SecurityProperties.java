@@ -15,6 +15,7 @@ package io.trino.plugin.iceberg.catalog.rest;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
+import io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.MissingTokenBehavior;
 import org.apache.iceberg.rest.auth.AuthProperties;
 import org.apache.iceberg.rest.auth.OAuth2Properties;
 
@@ -27,12 +28,14 @@ public class OAuth2SecurityProperties
 {
     private final Map<String, String> securityProperties;
     private final boolean tokenPassthroughEnabled;
+    private final MissingTokenBehavior missingTokenBehavior;
 
     @Inject
     public OAuth2SecurityProperties(OAuth2SecurityConfig securityConfig)
     {
         requireNonNull(securityConfig, "securityConfig is null");
         this.tokenPassthroughEnabled = securityConfig.isPassthroughEnabled();
+        this.missingTokenBehavior = securityConfig.getMissingTokenBehavior();
 
         ImmutableMap.Builder<String, String> propertiesBuilder = ImmutableMap.builder();
         propertiesBuilder.put(AuthProperties.AUTH_TYPE, AuthProperties.AUTH_TYPE_OAUTH2);
@@ -62,5 +65,11 @@ public class OAuth2SecurityProperties
     public boolean tokenPassthroughEnabled()
     {
         return tokenPassthroughEnabled;
+    }
+
+    @Override
+    public MissingTokenBehavior missingTokenBehavior()
+    {
+        return missingTokenBehavior;
     }
 }
