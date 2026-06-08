@@ -106,6 +106,13 @@ public class TrinoIcebergRestCatalogFactory
         checkArgument(
                 !(security == Security.OAUTH2 && tokenPassthroughEnabled && caseInsensitiveNameMatching),
                 "Cannot enable both 'iceberg.rest-catalog.oauth2.passthrough-enabled' and 'iceberg.rest-catalog.case-insensitive-name-matching': the remote-name mapping cache is shared across users and keyed by name only, so one user's resolved name could be served to another");
+        // Passthrough is only applied on the per-request USER session path (TrinoRestCatalog.convert()).
+        // With session-type NONE the per-user extra credentials are never consulted, so every query would
+        // silently run under the static catalog identity and REJECT would never be enforced. Reject the
+        // combination at startup so passthrough cannot be silently disabled by a missing session-type.
+        checkArgument(
+                !(security == Security.OAUTH2 && tokenPassthroughEnabled && sessionType != SessionType.USER),
+                "Cannot enable 'iceberg.rest-catalog.oauth2.passthrough-enabled' without setting 'iceberg.rest-catalog.session' to USER: passthrough forwards each user's token only on the per-request USER session, so any other session type would silently run all queries under the static catalog identity");
         this.remoteNamespaceMappingCache = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(restConfig.getCaseInsensitiveNameMatchingCacheTtl().toMillis(), MILLISECONDS)
                 .shareNothingWhenDisabled()

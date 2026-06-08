@@ -18,6 +18,7 @@ import io.trino.filesystem.memory.MemoryFileSystemFactory;
 import io.trino.plugin.iceberg.DefaultIcebergFileSystemFactory;
 import io.trino.plugin.iceberg.IcebergConfig;
 import io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogConfig.Security;
+import io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogConfig.SessionType;
 import io.trino.spi.NodeVersion;
 import io.trino.spi.catalog.CatalogName;
 import org.junit.jupiter.api.Test;
@@ -59,11 +60,39 @@ public class TestIcebergRestCatalogPassthroughNameMatchingValidation
         assertThatCode(() -> createFactory(Security.NONE, true, true)).doesNotThrowAnyException();
     }
 
+    @Test
+    public void testPassthroughWithoutUserSessionTypeRejected()
+    {
+        assertThatThrownBy(() -> createFactory(Security.OAUTH2, true, false, SessionType.NONE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("iceberg.rest-catalog.oauth2.passthrough-enabled")
+                .hasMessageContaining("iceberg.rest-catalog.session");
+    }
+
+    @Test
+    public void testNonUserSessionTypeWithoutPassthroughStartsNormally()
+    {
+        assertThatCode(() -> createFactory(Security.OAUTH2, false, false, SessionType.NONE)).doesNotThrowAnyException();
+    }
+
+    @Test
+    public void testNonUserSessionTypeCheckActiveOnlyForOAuth2()
+    {
+        // Passthrough is an OAuth2-only feature, so a non-USER session type is harmless under other security modes.
+        assertThatCode(() -> createFactory(Security.NONE, true, false, SessionType.NONE)).doesNotThrowAnyException();
+    }
+
     private static TrinoIcebergRestCatalogFactory createFactory(Security security, boolean passthroughEnabled, boolean caseInsensitiveNameMatching)
+    {
+        return createFactory(security, passthroughEnabled, caseInsensitiveNameMatching, SessionType.USER);
+    }
+
+    private static TrinoIcebergRestCatalogFactory createFactory(Security security, boolean passthroughEnabled, boolean caseInsensitiveNameMatching, SessionType sessionType)
     {
         IcebergRestCatalogConfig restConfig = new IcebergRestCatalogConfig()
                 .setBaseUri("http://localhost:8080")
                 .setSecurity(security)
+                .setSessionType(sessionType)
                 .setCaseInsensitiveNameMatching(caseInsensitiveNameMatching);
         SecurityProperties securityProperties = new SecurityProperties()
         {

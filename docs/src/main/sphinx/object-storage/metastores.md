@@ -518,6 +518,17 @@ following properties:
 * - `iceberg.rest-catalog.oauth2.token-exchange-enabled`
   - Controls whether to use the token exchange flow to acquire new tokens.
     Defaults to `true` 
+* - `iceberg.rest-catalog.oauth2.passthrough-enabled`
+  - Forward each user's own OAuth2 bearer token, supplied as the
+    `iceberg.oauth2.token` extra credential, to the REST catalog instead of the
+    static catalog token, so catalog metadata operations are authenticated under
+    the querying user's identity. Requires `iceberg.rest-catalog.session`
+    to be `USER`. Defaults to `false`. See [](iceberg-rest-token-passthrough).
+* - `iceberg.rest-catalog.oauth2.missing-token-behavior`
+  - Behavior when `passthrough-enabled` is `true` but a query supplies no
+    `iceberg.oauth2.token` extra credential. `REJECT` fails the query before any
+    catalog call; `FALLBACK` runs the query under the static catalog identity.
+    Defaults to `REJECT`.
 * - `iceberg.rest-catalog.vended-credentials-enabled`
   - Use credentials provided by the REST backend for file system access.
     Defaults to `false`.
@@ -582,6 +593,47 @@ The REST catalog supports [view management](sql-view-management)
 using the [Iceberg View specification](https://iceberg.apache.org/view-spec/).
 
 The REST catalog does not support [materialized view management](sql-materialized-view-management).
+
+(iceberg-rest-token-passthrough)=
+#### OAuth2 token passthrough
+
+By default an `OAUTH2` REST catalog authenticates every query with a single,
+statically configured `iceberg.rest-catalog.oauth2.token` or `credential`, so the
+REST backend sees all activity under one shared service-account identity. With
+`iceberg.rest-catalog.oauth2.passthrough-enabled=true`, each user instead supplies
+their own bearer token as the `iceberg.oauth2.token`
+[extra credential](/client/client-protocol) at connection time. Trino forwards that
+token, per request, as the `Authorization` header on catalog calls, so the backend
+enforces the user's own grants and attributes activity to them. The feature is
+opt-in and backward compatible: catalogs that do not enable it are unaffected.
+
+Passthrough requires `iceberg.rest-catalog.session-type=USER`; the catalog fails to
+start otherwise. It is also mutually exclusive with
+`iceberg.rest-catalog.case-insensitive-name-matching`, because the name-resolution
+cache is shared across users.
+
+A static `iceberg.rest-catalog.oauth2.token` or `credential` remains required: it
+bootstraps the one-time catalog configuration negotiation, which runs before any
+user query is in scope. With `missing-token-behavior=FALLBACK`, tokenless queries
+also run under that static identity; with the default `REJECT`, tokenless queries
+fail before any catalog call.
+
+Observe the following operational guidance when enabling passthrough:
+
+- **Require TLS on client connections.** Extra credentials carry bearer tokens over
+  the [Trino client protocol](/client/client-protocol); enable HTTPS so they are not
+  exposed in transit.
+- **Size token TTL to exceed query duration.** User tokens are fixed at connection
+  time and are not refreshed by Trino. Set
+  `iceberg.rest-catalog.oauth2.token-refresh-enabled=false` and ensure each token's
+  lifetime comfortably exceeds typical query runtime; Trino performs a best-effort
+  expiry pre-check but cannot prevent a token expiring mid-query.
+- **Pair with vended credentials for data-plane enforcement.** Passthrough governs
+  the control plane (catalog metadata) only. Underlying object-store reads and writes
+  use Trino's own storage identity unless
+  `iceberg.rest-catalog.vended-credentials-enabled=true` returns per-user-scoped
+  credentials from the backend. Without vended credentials, per-user authorization is
+  limited to catalog metadata.
 
 (iceberg-jdbc-catalog)=
 ### JDBC catalog
