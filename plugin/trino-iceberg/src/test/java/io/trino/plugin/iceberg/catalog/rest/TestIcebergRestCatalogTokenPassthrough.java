@@ -240,6 +240,23 @@ public class TestIcebergRestCatalogTokenPassthrough
     }
 
     @Test
+    public void testSmuggledCredentialKeyIsRejected()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        TrinoCatalog rejectCatalog = buildCatalog(MissingTokenBehavior.REJECT);
+
+        // The library also honors the 'credential' key as auth material; smuggling under it must be
+        // stripped and rejected before any catalog call, just like the raw 'token' key.
+        assertThatThrownBy(() -> rejectCatalog.listNamespaces(sessionWithCredentials("mallory", ImmutableMap.of(OAuth2Properties.CREDENTIAL, "smuggled:secret"))))
+                .isInstanceOf(TrinoException.class)
+                .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_MISSING.toErrorCode());
+
+        assertThat(capturedRequestLines).isEmpty();
+    }
+
+    @Test
     public void testCollidingRawKeyDoesNotOverridePassthroughToken()
     {
         capturedAuthorizationHeaders.clear();
