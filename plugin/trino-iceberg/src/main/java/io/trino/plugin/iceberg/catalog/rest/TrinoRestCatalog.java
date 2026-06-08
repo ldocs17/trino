@@ -927,9 +927,13 @@ public class TrinoRestCatalog
                 else if (passthroughTokenResolver.isEnabled()) {
                     // Passthrough is enabled but the query carried no usable token. REJECT fails fast here,
                     // before any catalog call; FALLBACK returns and the request runs under the catalog's
-                    // static service-account identity because no subject token is minted below.
-                    passthroughTokenResolver.enforceMissingTokenPolicy();
-                    credentials = ImmutableMap.copyOf(session.getIdentity().getExtraCredentials());
+                    // static service-account identity because no subject token is minted below. Any
+                    // (blank/whitespace) auth token the client supplied is stripped so it cannot reach the
+                    // downstream library and override the static identity.
+                    passthroughTokenResolver.checkMissingTokenAllowed();
+                    credentials = ImmutableMap.copyOf(Maps.filterKeys(
+                            session.getIdentity().getExtraCredentials(),
+                            key -> !key.equals(PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY) && !key.equals(OAuth2Properties.TOKEN)));
                 }
                 else {
                     Map<String, Object> claims = ImmutableMap.<String, Object>builder()

@@ -120,7 +120,7 @@ public final class PassthroughTokenResolver
      * before any catalog call is made; under {@link MissingTokenBehavior#FALLBACK} it returns normally
      * and the caller resolves the request to the static service-account identity.
      */
-    public void enforceMissingTokenPolicy()
+    public void checkMissingTokenAllowed()
     {
         if (missingTokenBehavior == MissingTokenBehavior.REJECT) {
             throw new TrinoException(

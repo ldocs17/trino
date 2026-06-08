@@ -70,7 +70,7 @@ public class TestPassthroughTokenResolver
     public void testRejectBehaviorThrowsOnMissingToken()
     {
         PassthroughTokenResolver resolver = new PassthroughTokenResolver(true, REJECT, FIXED_CLOCK);
-        assertThatThrownBy(resolver::enforceMissingTokenPolicy)
+        assertThatThrownBy(resolver::checkMissingTokenAllowed)
                 .isInstanceOf(TrinoException.class)
                 .hasFieldOrPropertyWithValue("errorCode", ICEBERG_OAUTH2_TOKEN_MISSING.toErrorCode())
                 .hasMessageContaining(EXTRA_CREDENTIAL_TOKEN_KEY)
@@ -81,7 +81,7 @@ public class TestPassthroughTokenResolver
     public void testFallbackBehaviorAllowsMissingToken()
     {
         PassthroughTokenResolver resolver = new PassthroughTokenResolver(true, FALLBACK, FIXED_CLOCK);
-        assertThatCode(resolver::enforceMissingTokenPolicy).doesNotThrowAnyException();
+        assertThatCode(resolver::checkMissingTokenAllowed).doesNotThrowAnyException();
         assertThat(resolver.missingTokenBehavior()).isEqualTo(FALLBACK);
     }
 

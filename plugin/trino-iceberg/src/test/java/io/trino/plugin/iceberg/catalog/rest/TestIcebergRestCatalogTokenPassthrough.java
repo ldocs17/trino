@@ -203,6 +203,22 @@ public class TestIcebergRestCatalogTokenPassthrough
                 .noneMatch(line -> line.contains("oauth/tokens") || line.contains("v1/oauth"));
     }
 
+    @Test
+    public void testFallbackStripsBlankTokenKey()
+    {
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        TrinoCatalog fallbackCatalog = buildCatalog(MissingTokenBehavior.FALLBACK);
+
+        // A blank token under the passthrough key is treated as absent; it must be stripped so it
+        // cannot reach the downstream library, and the request runs under the static identity.
+        fallbackCatalog.listNamespaces(sessionForUser("alice", "   "));
+
+        assertThat(capturedAuthorizationHeaders).contains("Bearer static-bootstrap-token");
+        assertThat(capturedAuthorizationHeaders).doesNotContain("Bearer    ", "Bearer ");
+    }
+
     private static ConnectorSession sessionForUser(String user, String token)
     {
         return TestingConnectorSession.builder()
