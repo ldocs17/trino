@@ -30,6 +30,7 @@ public class OAuth2SecurityConfig
     private URI serverUri;
     private boolean tokenRefreshEnabled = OAuth2Properties.TOKEN_REFRESH_ENABLED_DEFAULT;
     private boolean tokenExchangeEnabled = OAuth2Properties.TOKEN_EXCHANGE_ENABLED_DEFAULT;
+    private boolean passthroughEnabled;
 
     public Optional<String> getCredential()
     {
@@ -108,6 +109,19 @@ public class OAuth2SecurityConfig
     public OAuth2SecurityConfig setTokenExchangeEnabled(boolean tokenExchangeEnabled)
     {
         this.tokenExchangeEnabled = tokenExchangeEnabled;
+        return this;
+    }
+
+    public boolean isPassthroughEnabled()
+    {
+        return passthroughEnabled;
+    }
+
+    @Config("iceberg.rest-catalog.oauth2.passthrough-enabled")
+    @ConfigDescription("Forward each user's OAuth2 bearer token, supplied as the 'iceberg.oauth2.token' extra credential, to the REST catalog instead of the static catalog token")
+    public OAuth2SecurityConfig setPassthroughEnabled(boolean passthroughEnabled)
+    {
+        this.passthroughEnabled = passthroughEnabled;
         return this;
     }
 

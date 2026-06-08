@@ -132,6 +132,7 @@ public class TrinoRestCatalog
     private final Cache<Namespace, Namespace> remoteNamespaceMappingCache;
     private final Cache<TableIdentifier, TableIdentifier> remoteTableMappingCache;
     private final boolean viewEndpointsEnabled;
+    private final PassthroughTokenResolver passthroughTokenResolver;
 
     private final Cache<SchemaTableName, BaseTable> tableCache = EvictableCacheBuilder.newBuilder()
             .maximumSize(PER_QUERY_CACHE_SIZE)
@@ -151,7 +152,8 @@ public class TrinoRestCatalog
             boolean caseInsensitiveNameMatching,
             Cache<Namespace, Namespace> remoteNamespaceMappingCache,
             Cache<TableIdentifier, TableIdentifier> remoteTableMappingCache,
-            boolean viewEndpointsEnabled)
+            boolean viewEndpointsEnabled,
+            boolean tokenPassthroughEnabled)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.restSessionCatalog = requireNonNull(restSessionCatalog, "restSessionCatalog is null");
@@ -167,6 +169,7 @@ public class TrinoRestCatalog
         this.remoteNamespaceMappingCache = requireNonNull(remoteNamespaceMappingCache, "remoteNamespaceMappingCache is null");
         this.remoteTableMappingCache = requireNonNull(remoteTableMappingCache, "remoteTableMappingCache is null");
         this.viewEndpointsEnabled = viewEndpointsEnabled;
+        this.passthroughTokenResolver = new PassthroughTokenResolver(tokenPassthroughEnabled);
     }
 
     @Override
@@ -910,22 +913,34 @@ public class TrinoRestCatalog
                         "trinoCatalog", catalogName.toString(),
                         "trinoVersion", trinoVersion);
 
-                Map<String, Object> claims = ImmutableMap.<String, Object>builder()
-                        .putAll(properties)
-                        .buildOrThrow();
+                Optional<String> passthroughBearer = passthroughTokenResolver.resolveBearerToken(session.getIdentity().getExtraCredentials());
+                Map<String, String> credentials;
+                if (passthroughBearer.isPresent()) {
+                    credentials = ImmutableMap.<String, String>builder()
+                            .putAll(Maps.filterKeys(
+                                    session.getIdentity().getExtraCredentials(),
+                                    key -> !key.equals(PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY) && !key.equals(OAuth2Properties.TOKEN)))
+                            .put(OAuth2Properties.TOKEN, passthroughBearer.get())
+                            .buildOrThrow();
+                }
+                else {
+                    Map<String, Object> claims = ImmutableMap.<String, Object>builder()
+                            .putAll(properties)
+                            .buildOrThrow();
 
-                String subjectJwt = new DefaultJwtBuilder()
-                        .subject(session.getUser())
-                        .issuer(trinoVersion)
-                        .issuedAt(new Date())
-                        .claims(claims)
-                        .json(new JacksonSerializer<>())
-                        .compact();
+                    String subjectJwt = new DefaultJwtBuilder()
+                            .subject(session.getUser())
+                            .issuer(trinoVersion)
+                            .issuedAt(new Date())
+                            .claims(claims)
+                            .json(new JacksonSerializer<>())
+                            .compact();
 
-                Map<String, String> credentials = ImmutableMap.<String, String>builder()
-                        .putAll(session.getIdentity().getExtraCredentials())
-                        .put(OAuth2Properties.JWT_TOKEN_TYPE, subjectJwt)
-                        .buildOrThrow();
+                    credentials = ImmutableMap.<String, String>builder()
+                            .putAll(session.getIdentity().getExtraCredentials())
+                            .put(OAuth2Properties.JWT_TOKEN_TYPE, subjectJwt)
+                            .buildOrThrow();
+                }
 
                 yield new SessionCatalog.SessionContext(sessionId, session.getUser(), credentials, properties, session.getIdentity());
             }
