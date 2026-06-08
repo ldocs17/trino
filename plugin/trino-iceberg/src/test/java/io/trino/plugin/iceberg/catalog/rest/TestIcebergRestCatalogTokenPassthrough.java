@@ -257,6 +257,28 @@ public class TestIcebergRestCatalogTokenPassthrough
     }
 
     @Test
+    public void testSameUserDistinctTokensNeverShareCachedAuthSession()
+    {
+        // Cross-user cache-key regression guard. The Iceberg REST library caches per-request auth
+        // sessions keyed on sessionId alone (token read only on a cache miss); if two requests with
+        // different tokens ever share a sessionId, the second silently receives the first's cached
+        // bearer. Today TrinoRestCatalog.convert() composes sessionId as "user-queryId-source", and
+        // the globally-unique queryId is what keeps the key unique per request. This test pins that
+        // invariant: same user, same source, two distinct queries with two distinct tokens — both
+        // bearers must reach the wire. If a future change drops the queryId from the sessionId (or
+        // otherwise lets the two requests collide), the two sessions will share a cache entry and
+        // the second token will not appear in the captured headers, failing this test.
+        capturedAuthorizationHeaders.clear();
+        capturedRequestLines.clear();
+
+        catalog.listNamespaces(sessionForUser("alice", "user-token-alice-first"));
+        catalog.listNamespaces(sessionForUser("alice", "user-token-alice-second"));
+
+        assertThat(capturedAuthorizationHeaders).contains("Bearer user-token-alice-first");
+        assertThat(capturedAuthorizationHeaders).contains("Bearer user-token-alice-second");
+    }
+
+    @Test
     public void testCollidingRawKeyDoesNotOverridePassthroughToken()
     {
         capturedAuthorizationHeaders.clear();

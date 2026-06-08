@@ -90,6 +90,7 @@ import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
+import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.cache.CacheUtils.uncheckedCacheGet;
@@ -906,7 +907,16 @@ public class TrinoRestCatalog
         return switch (sessionType) {
             case NONE -> new SessionContext(randomUUID().toString(), null, credentials, ImmutableMap.of(), session.getIdentity());
             case USER -> {
-                String sessionId = format("%s-%s-%s", session.getUser(), session.getQueryId(), session.getSource().orElse("default"));
+                // Security-load-bearing: the Iceberg REST library caches per-request auth sessions in
+                // OAuth2Manager.contextualSession keyed on sessionId ALONE — the bearer is read only on a
+                // cache miss inside the loader. If two requests carrying different tokens ever share a
+                // sessionId, the second request silently receives the first's cached bearer (cross-user
+                // credential reuse, no other symptom). The globally-unique queryId is what makes the id
+                // unique per request; do not "optimize" it away. The verify() below pins this so a future
+                // change that drops the queryId fails fast at runtime instead of silently regressing.
+                String queryId = session.getQueryId();
+                String sessionId = format("%s-%s-%s", session.getUser(), queryId, session.getSource().orElse("default"));
+                verify(!queryId.isBlank() && sessionId.contains(queryId), "sessionId must include the per-request queryId to keep the Iceberg auth-session cache key unique per request");
 
                 Map<String, String> properties = ImmutableMap.of(
                         "user", session.getUser(),
