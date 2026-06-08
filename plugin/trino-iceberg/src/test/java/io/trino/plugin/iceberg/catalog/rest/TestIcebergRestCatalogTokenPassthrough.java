@@ -20,6 +20,7 @@ import io.airlift.http.server.ServerFeature;
 import io.airlift.http.server.testing.TestingHttpServer;
 import io.airlift.node.NodeInfo;
 import io.trino.cache.EvictableCacheBuilder;
+import io.trino.filesystem.memory.MemoryFileSystemFactory;
 import io.trino.plugin.iceberg.DefaultIcebergFileSystemFactory;
 import io.trino.plugin.iceberg.catalog.TrinoCatalog;
 import io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogConfig.Security;
@@ -48,7 +49,6 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import static io.trino.hdfs.HdfsTestUtils.HDFS_FILE_SYSTEM_FACTORY;
 import static io.trino.plugin.iceberg.catalog.rest.IcebergRestCatalogConfig.SessionType.USER;
 import static io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY;
 import static io.trino.plugin.iceberg.catalog.rest.RestCatalogTestUtils.backendCatalog;
@@ -96,7 +96,7 @@ public class TestIcebergRestCatalogTokenPassthrough
                 .buildOrThrow());
 
         catalog = new TrinoRestCatalog(
-                new DefaultIcebergFileSystemFactory(HDFS_FILE_SYSTEM_FACTORY),
+                new DefaultIcebergFileSystemFactory(new MemoryFileSystemFactory()),
                 restSessionCatalog,
                 new CatalogName("iceberg_rest"),
                 Security.OAUTH2,
