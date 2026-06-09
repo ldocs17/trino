@@ -13,9 +13,25 @@
  */
 package io.trino.plugin.iceberg.catalog.rest;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
+import io.trino.spi.TrinoException;
+import org.apache.iceberg.rest.auth.OAuth2Properties;
+
+import java.io.IOException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_EXPIRED;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_OAUTH2_TOKEN_MISSING;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -24,16 +40,85 @@ import static java.util.Objects.requireNonNull;
  * extra credential. When passthrough is disabled, or when no usable token is present,
  * the resolver yields {@link Optional#empty()} so callers fall back to the catalog's
  * statically configured authentication.
+ *
+ * <p>As a best-effort error-quality aid, the resolver performs a signature-free parse of
+ * a JWT token's {@code exp} claim and fails fast when the token is already expired or about
+ * to expire, so the user gets an actionable message instead of a cryptic downstream auth
+ * failure. This is a staleness hint only — <b>not</b> an authorization control — and opaque
+ * (non-JWT) tokens skip the check and pass through unchanged. The parse never verifies the
+ * signature and never makes a network call.
  */
 public final class PassthroughTokenResolver
 {
     public static final String EXTRA_CREDENTIAL_TOKEN_KEY = "iceberg.oauth2.token";
 
-    private final boolean enabled;
+    /**
+     * Extra-credential keys the Iceberg REST OAuth2 client honors as auth material: the raw bearer
+     * {@code token}, the client {@code credential}, and the token-exchange subject-token types. Under
+     * passthrough these are stripped from inbound extra credentials so a client cannot smuggle a bearer
+     * under a raw library key and bypass the opt-in flag, REJECT, normalization, and the expiry pre-check.
+     */
+    private static final Set<String> LIBRARY_AUTH_KEYS = ImmutableSet.of(
+            OAuth2Properties.TOKEN,
+            OAuth2Properties.CREDENTIAL,
+            OAuth2Properties.ACCESS_TOKEN_TYPE,
+            OAuth2Properties.REFRESH_TOKEN_TYPE,
+            OAuth2Properties.ID_TOKEN_TYPE,
+            OAuth2Properties.SAML1_TOKEN_TYPE,
+            OAuth2Properties.SAML2_TOKEN_TYPE,
+            OAuth2Properties.JWT_TOKEN_TYPE);
 
-    public PassthroughTokenResolver(boolean enabled)
+    /**
+     * Governs what happens when passthrough is enabled but a query carries no usable token.
+     */
+    public enum MissingTokenBehavior
+    {
+        /**
+         * Fail the query fast, before any catalog call, so a misconfigured client can never silently
+         * run under the catalog's shared identity.
+         */
+        REJECT,
+        /**
+         * Resolve the query to the catalog's static service-account identity by dropping the injected
+         * subject token, so the per-request session falls back to the static parent rather than
+         * performing a token exchange.
+         */
+        FALLBACK,
+    }
+
+    /**
+     * Tokens expiring within this window are treated as already stale so that a query does not
+     * race the token's expiry on its way to the REST catalog.
+     */
+    static final Duration EXPIRY_LEEWAY = Duration.ofSeconds(10);
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final Base64.Decoder URL_DECODER = Base64.getUrlDecoder();
+
+    private final boolean enabled;
+    private final MissingTokenBehavior missingTokenBehavior;
+    private final Clock clock;
+
+    public PassthroughTokenResolver(boolean enabled, MissingTokenBehavior missingTokenBehavior)
+    {
+        this(enabled, missingTokenBehavior, Clock.systemUTC());
+    }
+
+    PassthroughTokenResolver(boolean enabled, MissingTokenBehavior missingTokenBehavior, Clock clock)
     {
         this.enabled = enabled;
+        this.missingTokenBehavior = requireNonNull(missingTokenBehavior, "missingTokenBehavior is null");
+        this.clock = requireNonNull(clock, "clock is null");
+    }
+
+    public boolean isEnabled()
+    {
+        return enabled;
+    }
+
+    public MissingTokenBehavior missingTokenBehavior()
+    {
+        return missingTokenBehavior;
     }
 
     public Optional<String> resolveBearerToken(Map<String, String> extraCredentials)
@@ -46,6 +131,77 @@ public final class PassthroughTokenResolver
         if (token == null || token.isBlank()) {
             return Optional.empty();
         }
+        checkNotExpired(token);
         return Optional.of(token);
+    }
+
+    /**
+     * Removes every inbound extra-credential key the REST library would honor as auth material (see
+     * {@link #LIBRARY_AUTH_KEYS}) along with the consumed {@value #EXTRA_CREDENTIAL_TOKEN_KEY} key, so
+     * the only bearer that can reach the catalog is the one the caller injects. Building the result with
+     * overwrite-safe semantics means a colliding inbound key never causes an internal error and the
+     * injected token always takes precedence.
+     */
+    public Map<String, String> stripLibraryAuthCredentials(Map<String, String> extraCredentials)
+    {
+        requireNonNull(extraCredentials, "extraCredentials is null");
+        return ImmutableMap.copyOf(Maps.filterKeys(
+                extraCredentials,
+                key -> !key.equals(EXTRA_CREDENTIAL_TOKEN_KEY) && !LIBRARY_AUTH_KEYS.contains(key)));
+    }
+
+    /**
+     * Applies the configured {@link MissingTokenBehavior} when passthrough is enabled but the request
+     * carried no usable token. Under {@link MissingTokenBehavior#REJECT} this throws so the query fails
+     * before any catalog call is made; under {@link MissingTokenBehavior#FALLBACK} it returns normally
+     * and the caller resolves the request to the static service-account identity.
+     */
+    public void checkMissingTokenAllowed()
+    {
+        if (missingTokenBehavior == MissingTokenBehavior.REJECT) {
+            throw new TrinoException(
+                    ICEBERG_OAUTH2_TOKEN_MISSING,
+                    "OAuth2 token passthrough is enabled but the query supplied no '%s' extra credential; reconnect with a valid OAuth2 token".formatted(
+                            EXTRA_CREDENTIAL_TOKEN_KEY));
+        }
+    }
+
+    private void checkNotExpired(String token)
+    {
+        Optional<Instant> expiry = parseExpiry(token);
+        if (expiry.isEmpty()) {
+            return;
+        }
+        Instant now = clock.instant();
+        if (!expiry.get().isAfter(now.plus(EXPIRY_LEEWAY))) {
+            throw new TrinoException(
+                    ICEBERG_OAUTH2_TOKEN_EXPIRED,
+                    "OAuth2 token passed through the '%s' extra credential is expired (exp=%s); obtain a fresh token and retry".formatted(
+                            EXTRA_CREDENTIAL_TOKEN_KEY, expiry.get()));
+        }
+    }
+
+    /**
+     * Best-effort, signature-free extraction of the JWT {@code exp} claim. Returns empty for any
+     * token that is not a parseable JWT carrying a numeric {@code exp}, so opaque tokens pass through.
+     */
+    private static Optional<Instant> parseExpiry(String token)
+    {
+        String[] parts = token.split("\\.");
+        if (parts.length != 3) {
+            return Optional.empty();
+        }
+        try {
+            JsonNode payload = OBJECT_MAPPER.readTree(URL_DECODER.decode(parts[1]));
+            JsonNode exp = payload.get("exp");
+            if (exp == null || !exp.isNumber()) {
+                return Optional.empty();
+            }
+            return Optional.of(Instant.ofEpochSecond(exp.asLong()));
+        }
+        catch (IOException | RuntimeException _) {
+            // not a JWT we can read — treat as opaque and pass through
+            return Optional.empty();
+        }
     }
 }

@@ -39,6 +39,7 @@ import org.apache.iceberg.rest.RESTUtil;
 import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.apache.iceberg.rest.auth.OAuth2Properties.CREDENTIAL;
@@ -56,6 +57,7 @@ public class TrinoIcebergRestCatalogFactory
     private final SessionType sessionType;
     private final boolean viewEndpointsEnabled;
     private final boolean tokenPassthroughEnabled;
+    private final PassthroughTokenResolver.MissingTokenBehavior missingTokenBehavior;
     private final SecurityProperties securityProperties;
     private final IcebergRestCatalogPropertiesProvider catalogPropertiesProvider;
     private final boolean uniqueTableLocation;
@@ -90,11 +92,32 @@ public class TrinoIcebergRestCatalogFactory
         this.viewEndpointsEnabled = restConfig.isViewEndpointsEnabled();
         this.securityProperties = requireNonNull(securityProperties, "securityProperties is null");
         this.tokenPassthroughEnabled = securityProperties.tokenPassthroughEnabled();
+        this.missingTokenBehavior = securityProperties.missingTokenBehavior();
         this.catalogPropertiesProvider = requireNonNull(catalogPropertiesProvider, "catalogPropertiesProvider is null");
         requireNonNull(icebergConfig, "icebergConfig is null");
         this.uniqueTableLocation = icebergConfig.isUniqueTableLocation();
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.caseInsensitiveNameMatching = restConfig.isCaseInsensitiveNameMatching();
+        // The remote-name mapping caches below are catalog-scoped (shared across users) and keyed by
+        // name only, with no user dimension. Under token passthrough they are populated under the
+        // requesting user's identity, so one user's resolved name could be served to another. Reject
+        // the combination at startup. The check is meaningful only for OAuth2, the only security mode
+        // that supports passthrough.
+        checkArgument(
+                !(security == Security.OAUTH2 && tokenPassthroughEnabled && caseInsensitiveNameMatching),
+                "Cannot enable both 'iceberg.rest-catalog.oauth2.passthrough-enabled' and 'iceberg.rest-catalog.case-insensitive-name-matching': the remote-name mapping cache is shared across users and keyed by name only, so one user's resolved name could be served to another");
+        // Passthrough is only applied on the per-request USER session path (TrinoRestCatalog.convert()).
+        // With session-type NONE the per-user extra credentials are never consulted, so every query would
+        // silently run under the static catalog identity and REJECT would never be enforced. Reject the
+        // combination at startup so passthrough cannot be silently disabled by a missing session-type.
+        checkArgument(
+                !(security == Security.OAUTH2 && tokenPassthroughEnabled && sessionType != SessionType.USER),
+                "Cannot enable 'iceberg.rest-catalog.oauth2.passthrough-enabled' without setting 'iceberg.rest-catalog.session' to USER: passthrough forwards each user's token only on the per-request USER session, so any other session type would silently run all queries under the static catalog identity");
+        // 'iceberg.rest-catalog.oauth2.token-refresh-enabled=false' is recommended with passthrough (Trino
+        // has no grant to refresh a user's short-lived bearer), but it is intentionally NOT enforced here:
+        // the flag is catalog-wide and also governs the static bootstrap session, so forcing it off would
+        // be a surprising side effect of enabling passthrough. It composes freely with passthrough and is
+        // left as operator guidance (see docs) rather than a hard startup guard.
         this.remoteNamespaceMappingCache = EvictableCacheBuilder.newBuilder()
                 .expireAfterWrite(restConfig.getCaseInsensitiveNameMatchingCacheTtl().toMillis(), MILLISECONDS)
                 .shareNothingWhenDisabled()
@@ -146,6 +169,7 @@ public class TrinoIcebergRestCatalogFactory
                 remoteNamespaceMappingCache,
                 remoteTableMappingCache,
                 viewEndpointsEnabled,
-                tokenPassthroughEnabled);
+                tokenPassthroughEnabled,
+                missingTokenBehavior);
     }
 }

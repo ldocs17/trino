@@ -13,6 +13,8 @@
  */
 package io.trino.plugin.iceberg.catalog.rest;
 
+import io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.MissingTokenBehavior;
+
 import java.util.Map;
 
 public interface SecurityProperties
@@ -22,5 +24,10 @@ public interface SecurityProperties
     default boolean tokenPassthroughEnabled()
     {
         return false;
+    }
+
+    default MissingTokenBehavior missingTokenBehavior()
+    {
+        return MissingTokenBehavior.REJECT;
     }
 }

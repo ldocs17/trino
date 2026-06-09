@@ -102,6 +102,7 @@ import static io.trino.plugin.iceberg.IcebergSchemaProperties.LOCATION_PROPERTY;
 import static io.trino.plugin.iceberg.IcebergSchemaProperties.SUPPORTED_SCHEMA_PROPERTIES;
 import static io.trino.plugin.iceberg.IcebergUtil.quotedTableName;
 import static io.trino.plugin.iceberg.catalog.AbstractTrinoCatalog.ICEBERG_VIEW_RUN_AS_OWNER;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
@@ -153,7 +154,8 @@ public class TrinoRestCatalog
             Cache<Namespace, Namespace> remoteNamespaceMappingCache,
             Cache<TableIdentifier, TableIdentifier> remoteTableMappingCache,
             boolean viewEndpointsEnabled,
-            boolean tokenPassthroughEnabled)
+            boolean tokenPassthroughEnabled,
+            PassthroughTokenResolver.MissingTokenBehavior missingTokenBehavior)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.restSessionCatalog = requireNonNull(restSessionCatalog, "restSessionCatalog is null");
@@ -169,7 +171,7 @@ public class TrinoRestCatalog
         this.remoteNamespaceMappingCache = requireNonNull(remoteNamespaceMappingCache, "remoteNamespaceMappingCache is null");
         this.remoteTableMappingCache = requireNonNull(remoteTableMappingCache, "remoteTableMappingCache is null");
         this.viewEndpointsEnabled = viewEndpointsEnabled;
-        this.passthroughTokenResolver = new PassthroughTokenResolver(tokenPassthroughEnabled);
+        this.passthroughTokenResolver = new PassthroughTokenResolver(tokenPassthroughEnabled, missingTokenBehavior);
     }
 
     @Override
@@ -905,7 +907,18 @@ public class TrinoRestCatalog
         return switch (sessionType) {
             case NONE -> new SessionContext(randomUUID().toString(), null, credentials, ImmutableMap.of(), session.getIdentity());
             case USER -> {
-                String sessionId = format("%s-%s-%s", session.getUser(), session.getQueryId(), session.getSource().orElse("default"));
+                // Security-load-bearing: the Iceberg REST library caches per-request auth sessions in
+                // OAuth2Manager.contextualSession keyed on sessionId ALONE — the bearer is read only on a
+                // cache miss inside the loader. If two requests carrying different tokens ever share a
+                // sessionId, the second request silently receives the first's cached bearer (cross-user
+                // credential reuse, no other symptom). The globally-unique queryId is what makes the id
+                // unique per request; do not "optimize" it away. The check below pins this so a future
+                // change that drops the queryId fails fast at runtime instead of silently regressing.
+                String queryId = session.getQueryId();
+                String sessionId = format("%s-%s-%s", session.getUser(), queryId, session.getSource().orElse("default"));
+                if (queryId.isBlank() || !sessionId.contains(queryId)) {
+                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "sessionId must include the per-request queryId to keep the Iceberg auth-session cache key unique per request");
+                }
 
                 Map<String, String> properties = ImmutableMap.of(
                         "user", session.getUser(),
@@ -913,15 +926,27 @@ public class TrinoRestCatalog
                         "trinoCatalog", catalogName.toString(),
                         "trinoVersion", trinoVersion);
 
-                Optional<String> passthroughBearer = passthroughTokenResolver.resolveBearerToken(session.getIdentity().getExtraCredentials());
+                Map<String, String> extraCredentials = session.getIdentity().getExtraCredentials();
+                Optional<String> passthroughBearer = passthroughTokenResolver.resolveBearerToken(extraCredentials);
                 Map<String, String> credentials;
                 if (passthroughBearer.isPresent()) {
+                    // Strip every library-recognized auth key first so a client cannot smuggle a bearer under
+                    // a raw key (token/credential/token-exchange types) past the passthrough gate. The injected
+                    // token is then the sole bearer; the sanitized map never carries TOKEN, so the build cannot
+                    // collide and the resolver's authorized token always takes precedence.
                     credentials = ImmutableMap.<String, String>builder()
-                            .putAll(Maps.filterKeys(
-                                    session.getIdentity().getExtraCredentials(),
-                                    key -> !key.equals(PassthroughTokenResolver.EXTRA_CREDENTIAL_TOKEN_KEY) && !key.equals(OAuth2Properties.TOKEN)))
+                            .putAll(passthroughTokenResolver.stripLibraryAuthCredentials(extraCredentials))
                             .put(OAuth2Properties.TOKEN, passthroughBearer.get())
                             .buildOrThrow();
+                }
+                else if (passthroughTokenResolver.isEnabled()) {
+                    // Passthrough is enabled but the query carried no usable token. REJECT fails fast here,
+                    // before any catalog call; FALLBACK returns and the request runs under the catalog's
+                    // static service-account identity because no subject token is minted below. Any
+                    // (blank/whitespace or raw-key) auth material the client supplied is stripped here so
+                    // it cannot reach the downstream library and override the static identity.
+                    passthroughTokenResolver.checkMissingTokenAllowed();
+                    credentials = passthroughTokenResolver.stripLibraryAuthCredentials(extraCredentials);
                 }
                 else {
                     Map<String, Object> claims = ImmutableMap.<String, Object>builder()

@@ -16,7 +16,9 @@ package io.trino.plugin.iceberg.catalog.rest;
 import io.airlift.configuration.Config;
 import io.airlift.configuration.ConfigDescription;
 import io.airlift.configuration.ConfigSecuritySensitive;
+import io.trino.plugin.iceberg.catalog.rest.PassthroughTokenResolver.MissingTokenBehavior;
 import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.NotNull;
 import org.apache.iceberg.rest.auth.OAuth2Properties;
 
 import java.net.URI;
@@ -31,6 +33,7 @@ public class OAuth2SecurityConfig
     private boolean tokenRefreshEnabled = OAuth2Properties.TOKEN_REFRESH_ENABLED_DEFAULT;
     private boolean tokenExchangeEnabled = OAuth2Properties.TOKEN_EXCHANGE_ENABLED_DEFAULT;
     private boolean passthroughEnabled;
+    private MissingTokenBehavior missingTokenBehavior = MissingTokenBehavior.REJECT;
 
     public Optional<String> getCredential()
     {
@@ -122,6 +125,20 @@ public class OAuth2SecurityConfig
     public OAuth2SecurityConfig setPassthroughEnabled(boolean passthroughEnabled)
     {
         this.passthroughEnabled = passthroughEnabled;
+        return this;
+    }
+
+    @NotNull
+    public MissingTokenBehavior getMissingTokenBehavior()
+    {
+        return missingTokenBehavior;
+    }
+
+    @Config("iceberg.rest-catalog.oauth2.missing-token-behavior")
+    @ConfigDescription("Behavior when token passthrough is enabled but a query supplies no token: REJECT fails the query, FALLBACK uses the static catalog identity")
+    public OAuth2SecurityConfig setMissingTokenBehavior(MissingTokenBehavior missingTokenBehavior)
+    {
+        this.missingTokenBehavior = missingTokenBehavior;
         return this;
     }
 
